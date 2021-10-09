@@ -27,6 +27,14 @@ import "../interfaces/IMasterChefV2.sol";
 
 // File: SGTStakingStrategy.sol
 
+/**
+Based on ALCX staking strategy
+Solo stakes SGT into Sharedstake.org masterchef
+Harvests and recompounds SGT position
+
+Will require a SGT vault to deploy
+ */
+
 contract SGTStakingStrategy is BaseStrategy {
     using SafeERC20 for IERC20;
     using Address for address;

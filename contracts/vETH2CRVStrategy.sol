@@ -30,6 +30,21 @@ import {
 // File: vETH2StakingStrategy.sol
 
 // use against 0xa258C4606Ca8206D8aA700cE2143D7db854D168c eth vault
+/**
+gov = "ychad.eth"
+evault = Vault.at("0xa258C4606Ca8206D8aA700cE2143D7db854D168c")
+
+s = vETH2CRVStakingStrategy.deploy(evault, {"from": accounts[0]})
+
+evault.addStrategy(s, 1000, 0, 2 ** 256 - 1, 50, {"from": gov})
+
+harvest_tx = s.harvest({"from": accounts[0]}) 
+ret1 = evault.strategies(s)
+chain.mine(50)
+harvest_tx = s.harvest({"from": accounts[0]}) 
+ret2 = evault.strategies(s)
+
+ */
 
 // Stake ETH to vETH2-wETH CRV pool
 // Stake CRV LP in masterchef
@@ -40,7 +55,7 @@ contract vETH2CRVStakingStrategy is BaseStrategy {
     using Address for address;
     using SafeMath for uint256;
 
-    uint256 _poolId = 0;
+    uint256 _poolId = 5;
     uint256 public surplusProfit = 0;
     uint public slip = 50;
     uint constant public DENOMINATOR = 10000;
@@ -61,10 +76,12 @@ contract vETH2CRVStakingStrategy is BaseStrategy {
 
     constructor(address _vault) public BaseStrategy(_vault) {
         //Approve staking contract to spend ALCX tokens
-        // want = veth2 in this case, so vault needs to be a veth vault
+        // want = weth in this case, so vault needs to be a eth vault
 
         want.safeApprove(address(crvpool), type(uint256).max);
         vethCRV.safeApprove(address(pool), type(uint256).max);
+        vethCRV.safeApprove(address(crvpool), type(uint256).max);
+
         IERC20(sgt).approve(sushiRouter, type(uint256).max);
         activeDex = sushiRouter;
     }
@@ -90,6 +107,10 @@ contract vETH2CRVStakingStrategy is BaseStrategy {
         return balanceOfvethCRV().mul(crvpool.get_virtual_price()).div(1e18);
     }
 
+    function balanceOfStakeInWant() public view returns (uint) {
+      return balanceOfStake().mul(crvpool.get_virtual_price()).div(1e18);
+    }
+
     function pendingReward() public view virtual returns (uint256) {
         return pool.pendingReward(_poolId, address(this));
     }
@@ -99,21 +120,12 @@ contract vETH2CRVStakingStrategy is BaseStrategy {
     }
 
     function estimatedTotalAssets() public view override returns (uint256) {
-        return balanceOfWant().add(balanceOfvethCRVinWant());
-
-        // //Add the vault tokens + staked tokens from 1inch governance contract
-        // uint256 totalSGT = _selfBalanceOfTokensToSell();
-        // totalSGT = totalSGT.add(pendingReward());
-
-        // uint256 totalWant = balanceOfStake().add(balanceOfStake());
-        // if(totalSGT > 0){
-        //     totalWant = totalWant.add(convertSGTToWant(totalSGT));
-        // }
-
-        // return balanceOfWant().add(balanceOfStake()).add(pendingReward());
+      uint256 totalSGT = _selfBalanceOfTokensToSell().add(pendingReward());
+      uint256 totalWant = balanceOfWant().add(balanceOfStakeInWant()).add(balanceOfvethCRVinWant());
+      return totalWant.add(convertSGTToWant(totalSGT));
     }
 
-    function _deposit(uint256 _depositAmount) internal {
+    function _deposit(uint256 _depositAmount) public {
         pool.deposit(_poolId, _depositAmount, address(this));
     }
 
@@ -136,14 +148,25 @@ contract vETH2CRVStakingStrategy is BaseStrategy {
             uint256 _debtPayment
         )
     {
+      return _prepareReturn(_debtOutstanding);
+    }
+
+    function _prepareReturn2(uint256 _debtOutstanding)
+        public
+        returns (
+            uint256 _profit,
+            uint256 _loss,
+            uint256 _debtPayment
+        )
+    {
+
         tank = balanceOfWant();
         if (_debtOutstanding > 0) {
             if (tank >= _debtOutstanding) {
                 _profit = tank.sub(_debtOutstanding);
                 _debtPayment = _debtOutstanding;
                 tank = tank.sub(_debtOutstanding);
-            }
-            else {
+            } else {
                 uint _withdrawn = _withdrawSome(_debtOutstanding.sub(tank));
                 _withdrawn = _withdrawn.add(tank);
                 if (_withdrawn < _debtOutstanding) {
@@ -162,36 +185,30 @@ contract vETH2CRVStakingStrategy is BaseStrategy {
     }
 
 
-    // function prepareReturn(uint256 _debtOutstanding)
-    //     internal
-    //     override
-    //     returns (
-    //         uint256 _profit,
-    //         uint256 _loss,
-    //         uint256 _debtPayment
-    //     )
-    // {
+    function _prepareReturn(uint256 _debtOutstanding)
+        public
+        returns (
+            uint256 _profit,
+            uint256 _loss,
+            uint256 _debtPayment
+        )
+    {
 
-    //     uint256 balanceOfWantBefore = balanceOfWant();
+        // We might need to return want to the vault
+        if (_debtOutstanding > balanceOfWant()) {
+            uint256 _amountFreed = 0;
+            (_amountFreed, _loss) = liquidatePosition(_debtOutstanding);
+            _debtPayment = Math.min(_amountFreed, _debtOutstanding);
+        }
 
-    //     // We might need to return want to the vault
-    //     if (_debtOutstanding > 0) {
-    //         uint256 _amountFreed = 0;
-    //         (_amountFreed, _loss) = liquidatePosition(_debtOutstanding);
-    //         _debtPayment = Math.min(_amountFreed, _debtOutstanding);
+        uint256 balanceOfWantBefore = balanceOfWant();
+        getReward();
+        _sell(_selfBalanceOfTokensToSell());
+        _profit = balanceOfWant().sub(balanceOfWantBefore);
+        tank = balanceOfWant();
 
-    //     }
-
-    //     uint256 balanceOfWantBefore = balanceOfWant();
-
-    //     getReward();
-    //     _sell(_selfBalanceOfTokensToSell());
-    //     _profit = balanceOfWant().sub(balanceOfWantBefore);
-    //     _profit += surplusProfit;
-    //     tank = balanceOfWant();
-
-    //     surplusProfit = 0;
-    // }
+        surplusProfit = 0;
+    }
 
     function adjustPosition(uint256 _debtOutstanding) internal override {
         uint256 _wantAvailable = balanceOfWant();
@@ -203,26 +220,16 @@ contract vETH2CRVStakingStrategy is BaseStrategy {
         uint256 toInvest = _wantAvailable.sub(_debtOutstanding);
 
         if (toInvest > 0) {
-          deposit();
+          deposit(toInvest);
         }
     }
 
-
-    function deposit() internal {
-        uint _want = balanceOfWant();
-        if (_want > 0) {
-            // if (_want > maxAmount) _want = maxAmount;
-            uint v = _want.mul(1e18).div(crvpool.get_virtual_price());
-            // weth.withdraw(_want);
-            _want = balanceOfWant();
-            crvpool.add_liquidity{value: _want}([_want, 0], v.mul(DENOMINATOR.sub(slip)).div(DENOMINATOR));
-            if (_want < tank) tank = tank.sub(_want);
-            else tank = 0;
-        }
-        uint _amnt = vethCRV.balanceOf(address(this));
-        if (_amnt > 0) {
-            _deposit(_amnt);
-        }
+    function deposit(uint256 toInvest) public {
+      crvpool.add_liquidity([0,toInvest], 0);
+      uint _amnt = balanceOfvethCRV();
+      if (_amnt > 0) {
+          _deposit(_amnt);
+      }
     }
 
     function liquidatePosition(uint256 _amountNeeded)
@@ -245,27 +252,6 @@ contract vETH2CRVStakingStrategy is BaseStrategy {
         }
     }
 
-
-    // function liquidatePosition(uint256 _amountNeeded)
-    //     internal
-    //     override
-    //     returns (uint256 _liquidatedAmount, uint256 _loss)
-    // {
-    //     uint _balance = balanceOfWant();
-    //     if (_balance < _amountNeeded) {
-    //         _liquidatedAmount = _withdrawSome(_amountNeeded.sub(_balance));
-    //         _liquidatedAmount = _liquidatedAmount.add(_balance);
-    //         if (_liquidatedAmount > _amountNeeded) _liquidatedAmount = _amountNeeded;
-    //         else _loss = _amountNeeded.sub(_liquidatedAmount);
-    //         tank = 0;
-    //     }
-    //     else {
-    //         _liquidatedAmount = _amountNeeded;
-    //         if (tank >= _amountNeeded) tank = tank.sub(_amountNeeded);
-    //         else tank = 0;
-    //     }
-    // }
-
     function _withdrawSome(uint _amount) internal returns (uint) {
         uint _amnt = _amount.mul(1e18).div(crvpool.get_virtual_price());
         uint _before = balanceOfvethCRV();
@@ -275,14 +261,11 @@ contract vETH2CRVStakingStrategy is BaseStrategy {
     }
 
     function _withdrawOne(uint _amnt) internal returns (uint _bal) {
-        // uint _before = address(this).balance;
         uint _before = balanceOfWant();
         crvpool.remove_liquidity_one_coin(_amnt, 0, _amnt.mul(DENOMINATOR.sub(slip)).div(DENOMINATOR));
-        // uint _after = address(this).balance;
         uint _after = balanceOfWant();
 
         _bal = _after.sub(_before);
-        // weth.deposit{value: _bal}();
     }
 
 
@@ -297,26 +280,17 @@ contract vETH2CRVStakingStrategy is BaseStrategy {
     }
 
     function convertSGTToWant(uint256 _amount) internal view returns (uint256) {
-        bool is_weth = address(want) == weth;
-        address[] memory path = new address[](is_weth ? 2 : 3);
+        address[] memory path = new address[](2);
         path[0] = address(sgt);
-        if (is_weth) {
-            path[1] = weth;
-        } else {
-            path[1] = weth;
-            path[2] = address(want);
-        }
+        path[1] = weth;
         return IUniswapV2Router01(activeDex).getAmountsOut(_amount, path)[path.length - 1];
     }
 
     function _sell(uint256 _amount) internal {
-        bool is_weth = address(want) == weth;
-        address[] memory path = new address[](is_weth ? 2 : 3);
+      if (_amount == 0) return;
+        address[] memory path = new address[](2);
         path[0] = address(sgt);
         path[1] = weth;
-        if (!is_weth) {
-            path[2] = address(want);
-        }
         IUniswapV2Router01(activeDex)
             .swapExactTokensForTokens(_amount,
                 0,
@@ -343,31 +317,4 @@ contract vETH2CRVStakingStrategy is BaseStrategy {
     // Override this to add all tokens/tokenized positions this contract manages
     // on a *persistent* basis (e.g. not just for swapping back to want ephemerally)
     function protectedTokens() internal view override returns (address[] memory) {}
-
-
-
-    // function drip() internal {
-    //     _p = pool.get_virtual_price();
-    //     if (_p >= p) {
-    //         tip = tip.add((_p.sub(p)).mul(balanceOfyvsteCRV()).div(1e18));
-    //     }
-    //     else {
-    //         rip = rip.add((p.sub(_p)).mul(balanceOfyvsteCRV()).div(1e18));
-    //     }
-    //     p = _p;
-    // }
-
-    // function tick() public view returns (uint _t, uint _c) {
-    //     _t = pool.balances(0).mul(threshold).div(DENOMINATOR);
-    //     _c = balanceOfyvsteCRVinWant();
-    // }
-
-    // function rebalance() internal {
-    //     drip();
-    //     (uint _t, uint _c) = tick();
-    //     if (_c > _t) {
-    //         _withdrawSome(_c.sub(_t));
-    //         tank = balanceOfWant();
-    //     }
-    // }
 }
